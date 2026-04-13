@@ -10,7 +10,7 @@ Your MCP agent sees 80,000 tools. Every tool definition eats context. Every extr
 
 `shutup` sits between your agent and **all** your MCP servers. It reads the user's intent, and only shows the agent the 3-5 tools that matter across **any** connected server. The agent never knows the other 79,997 exist.
 
-## Why V0.3 is a Game Changer
+## Why 
 
 - **Multi-Server Aggregation**: Parses `claude_desktop_config.json` and connects to all your MCP servers at once.
 - **Dynamic Reload**: Watches your config file and rebuilds the tool index automatically when you add or remove servers.
