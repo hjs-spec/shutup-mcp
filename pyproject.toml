@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shutup-mcp"
+version = "0.1.0"
+description = "A zero-config MCP proxy that hides irrelevant tools using local embeddings"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "yuqiang", email = "yuqiang@humanjudgment.org"}
+]
+keywords = ["mcp", "agent", "tools", "filter", "token", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+    "sentence-transformers>=2.2.0",
+    "watchdog>=3.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/hjs-spec/shutup-mcp"
+Repository = "https://github.com/hjs-spec/shutup-mcp.git"
+Issues = "https://github.com/hjs-spec/shutup-mcp/issues"
+
+[project.scripts]
+shutup = "shutup.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["shutup*"]
