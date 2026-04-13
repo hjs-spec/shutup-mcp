@@ -11,7 +11,7 @@ license = {text = "MIT"}
 authors = [
     {name = "yuqiang", email = "yuqiang@humanjudgment.org"}
 ]
-keywords = ["mcp", "agent", "tools", "filter", "token", "llm"]
+keywords = ["mcp", "agent", "tools", "filter", "token", "llm", "ollama", "embeddings"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -28,6 +28,14 @@ dependencies = [
     "mcp>=1.0.0",
     "sentence-transformers>=2.2.0",
     "watchdog>=3.0.0",
+    "ollama>=0.1.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
 ]
 
 [project.urls]
