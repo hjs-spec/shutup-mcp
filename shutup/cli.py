@@ -11,18 +11,18 @@ from .proxy import ShutupProxy
 def main():
     """Entry point for the shutup command."""
     parser = argparse.ArgumentParser(
-        description="shutup - An MCP proxy that filters tools based on user intent.",
+        description="shutup - An MCP proxy that dynamically filters tools based on user intent.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Use with sentence-transformers (default)
-  shutup --config ~/.../claude_desktop_config.json --intent "read and write files"
+  shutup --config ~/.../claude_desktop_config.json
 
   # Use with Ollama for fully offline embeddings
-  shutup --config ~/.../claude_desktop_config.json --intent "process excel" --embedder ollama
+  shutup --config ~/.../claude_desktop_config.json --embedder ollama
 
   # Return top 3 tools instead of default 5
-  shutup --config ~/.../claude_desktop_config.json --intent "github issues" --top-k 3
+  shutup --config ~/.../claude_desktop_config.json --top-k 3
 """,
     )
     parser.add_argument(
@@ -30,12 +30,6 @@ Examples:
         type=str,
         required=True,
         help="Path to MCP config file (e.g., claude_desktop_config.json)."
-    )
-    parser.add_argument(
-        "--intent", "-i",
-        type=str,
-        required=True,
-        help="User's current task or intent description."
     )
     parser.add_argument(
         "--top-k", "-k",
@@ -59,13 +53,12 @@ Examples:
         sys.exit(1)
 
     print(f"[shutup] Starting with config: {config_path}", file=sys.stderr)
-    print(f"[shutup] Intent: '{args.intent}'", file=sys.stderr)
     print(f"[shutup] Top-K: {args.top_k}", file=sys.stderr)
     print(f"[shutup] Embedder: {args.embedder}", file=sys.stderr)
+    print("[shutup] Dynamic intent detection: ENABLED", file=sys.stderr)
 
     proxy = ShutupProxy(
         config_path=config_path,
-        intent=args.intent,
         top_k=args.top_k,
         embedder_backend=args.embedder,
     )
