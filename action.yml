@@ -1,0 +1,50 @@
+name: 'shutup - MCP Tool Filter'
+description: 'Hide 99% of your MCP tools so your agent can finally focus.'
+author: 'HJS Foundation'
+
+branding:
+  icon: 'filter'
+  color: 'gray-dark'
+
+inputs:
+  config:
+    description: 'Path to your MCP config file (e.g., claude_desktop_config.json)'
+    required: true
+  intent:
+    description: 'Description of the user task'
+    required: true
+  top_k:
+    description: 'Number of relevant tools to return'
+    required: false
+    default: '5'
+  embedder:
+    description: 'Embedding backend (sentence-transformers or ollama)'
+    required: false
+    default: 'sentence-transformers'
+
+outputs:
+  filtered_tools:
+    description: 'A JSON array of the filtered tool names and descriptions'
+  tool_count:
+    description: 'The number of tools returned'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - name: Install shutup
+      run: pip install shutup-mcp
+      shell: bash
+    - name: Run shutup
+      id: filter
+      run: |
+        # 执行 shutup 命令并捕获 JSON 输出
+        output=$(shutup --config ${{ inputs.config }} --intent "${{ inputs.intent }}" --top-k ${{ inputs.top_k }} --embedder ${{ inputs.embedder }})
+        # 将输出写入 GitHub Actions 的输出变量
+        echo "filtered_tools=$output" >> $GITHUB_OUTPUT
+        # 计算工具数量
+        echo "tool_count=$(echo $output | jq '. | length')" >> $GITHUB_OUTPUT
+      shell: bash
