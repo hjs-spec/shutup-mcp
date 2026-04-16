@@ -94,4 +94,3 @@ shutup --config PATH --intent TEXT [--top-k K] [--embedder {sentence-transformer
 ## License
 
 MIT
-```
