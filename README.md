@@ -1,60 +1,119 @@
-# shutup
+# shutup-mcp
 
-> An MCP proxy that hides 99% of your tools so your agent can finally focus.
+> Experimental MCP tool-list filtering proxy for large tool catalogs.
 
-## The Problem
+`shutup-mcp` sits between an MCP client and one or more MCP servers. It aggregates tool definitions and exposes only the top-k tools that match the current intent.
 
-Your MCP agent sees 80,000 tools. Every tool definition eats context. Every extra tool is a chance to pick the wrong one. Anthropic's tool search gets it right 34% of the time. The rest is noise.
+This repository is an **alpha implementation seed**. It is useful for experimenting with tool-list compression, but it is not yet a full production MCP gateway.
 
-## The Solution
+---
 
-`shutup` sits between your agent and **all** your MCP servers. It reads the user's intent, and only shows the agent the 3-5 tools that matter across **any** connected server. The agent never knows the other 79,997 exist.
+## What It Does
 
-## Why 
+- Reads a Claude Desktop-style MCP config.
+- Discovers configured MCP servers.
+- Fetches and prefixes upstream tools.
+- Builds a hybrid retrieval index over tool names and descriptions.
+- Filters `tools/list` results using:
+  - explicit CLI intent;
+  - a runtime `shutup__set_intent` tool;
+  - fallback behavior when no intent is known.
+- Routes `tools/call` to the correct upstream server.
+- Supports local embedding backends:
+  - `sentence-transformers`;
+  - `ollama`.
 
-- **Multi-Server Aggregation**: Parses `claude_desktop_config.json` and connects to all your MCP servers at once.
-- **Dynamic Reload**: Watches your config file and rebuilds the tool index automatically when you add or remove servers.
-- **Local & Private**: Choose between `sentence-transformers` (default) or `Ollama` for completely offline, privacy-first embeddings.
+---
 
-## Results
+## What It Does Not Yet Do
 
-- Token usage: **-98%**
-- Response time: **-85%**
-- Tool selection accuracy: **+2x**
+This alpha does not yet provide:
 
-## Quick Start
+- full MCP request proxying for every capability;
+- persistent upstream sessions for every server;
+- guaranteed client-side dynamic intent detection across all MCP clients;
+- production authentication or sandboxing;
+- benchmark-backed token or latency claims.
 
-### 1. Install
+Earlier README versions included strong reduction metrics. Those are removed until reproducible benchmarks are added.
+
+---
+
+## Install
 
 ```bash
 pip install shutup-mcp
 ```
 
-### 2. Run with your Claude Desktop config
+For local development:
 
 ```bash
-shutup --config ~/Library/Application\ Support/Claude/claude_desktop_config.json --intent "your task description"
+pip install -e ".[dev]"
 ```
 
-For a completely offline experience using Ollama:
+---
+
+## CLI Usage
+
+### One-shot tool filtering
 
 ```bash
-shutup --config ~/.../claude_desktop_config.json --intent "process excel files" --embedder ollama
+shutup \
+  --config ~/Library/Application\ Support/Claude/claude_desktop_config.json \
+  --intent "read and write local files" \
+  --top-k 5
 ```
 
-## How It Works
+This prints a JSON array of filtered tool definitions.
 
-1. `shutup` reads your `claude_desktop_config.json` and discovers all your MCP servers.
-2. It connects to each server, fetches their tool lists, and aggregates them.
-3. Using a local embedding model (or Ollama), it builds a searchable index of all tools.
-4. When your agent sends a request, `shutup` intercepts the `tools/list` call and returns only the top-K most relevant tools based on your intent.
-5. It watches your config file and automatically refreshes the index when you add or remove MCP servers.
+### Run as MCP proxy
 
-## Configuration
+```bash
+shutup \
+  --config ~/Library/Application\ Support/Claude/claude_desktop_config.json \
+  --intent "work with GitHub issues" \
+  --serve \
+  --top-k 5
+```
 
-`shutup` works out of the box with your existing Claude Desktop MCP configuration. No changes required.
+If `--intent` is supplied, `tools/list` returns only top-k tools matching that intent.
 
-Example `claude_desktop_config.json`:
+If no intent is supplied, the proxy exposes a small control tool:
+
+```text
+shutup__set_intent
+```
+
+Calling this tool updates the current intent, after which `tools/list` can be filtered.
+
+---
+
+## Claude Desktop Configuration
+
+Example:
+
+```json
+{
+  "mcpServers": {
+    "shutup": {
+      "command": "shutup",
+      "args": [
+        "--config",
+        "/absolute/path/to/claude_desktop_config.json",
+        "--serve",
+        "--intent",
+        "work with GitHub issues",
+        "--top-k",
+        "5"
+      ]
+    }
+  }
+}
+```
+
+---
+
+## Example MCP Server Config
 
 ```json
 {
@@ -71,25 +130,83 @@ Example `claude_desktop_config.json`:
 }
 ```
 
+---
+
 ## Embedder Options
 
 | Backend | Description | Privacy | Setup |
-| :--- | :--- | :--- | :--- |
-| `sentence-transformers` (default) | Local `all-MiniLM-L6-v2` model (~80MB) | Fully local | Auto-downloads on first run |
-| `ollama` | Uses Ollama's `nomic-embed-text` or any other embedding model | Fully local | Requires [Ollama](https://ollama.com) running |
+|---|---|---|---|
+| `sentence-transformers` | Local model such as `all-MiniLM-L6-v2` | Local after download | Downloads model on first use |
+| `ollama` | Ollama embedding model | Local | Requires Ollama running |
+| `fake` | Deterministic lightweight test embedder | Local | For tests and CI only |
 
-## Command Line Options
+---
 
-```
-shutup --config PATH --intent TEXT [--top-k K] [--embedder {sentence-transformers,ollama}]
+## Command Options
+
+```text
+shutup --config PATH [--intent TEXT] [--top-k K] [--embedder BACKEND] [--serve]
 ```
 
 | Option | Description | Default |
-| :--- | :--- | :--- |
-| `--config` | Path to `claude_desktop_config.json` | Required |
-| `--intent` | User's current task description | Required |
-| `--top-k` | Number of tools to return | 5 |
-| `--embedder` | Embedding backend | `sentence-transformers` |
+|---|---|---|
+| `--config` | Path to Claude Desktop MCP config | required |
+| `--intent` | Current user task intent | none |
+| `--top-k` | Number of tools to expose | 5 |
+| `--embedder` | `sentence-transformers`, `ollama`, or `fake` | `sentence-transformers` |
+| `--serve` | Run as an MCP stdio proxy | false |
+
+---
+
+## Runtime Intent Tool
+
+The proxy exposes a control tool:
+
+```text
+shutup__set_intent
+```
+
+Input:
+
+```json
+{
+  "intent": "create and triage GitHub issues"
+}
+```
+
+Output:
+
+```json
+{
+  "ok": true,
+  "intent": "create and triage GitHub issues"
+}
+```
+
+This provides an explicit client-controlled intent update path.
+
+---
+
+## Testing
+
+```bash
+pip install -e ".[dev]"
+pytest -q
+```
+
+Tests use the lightweight `fake` embedder and do not download embedding models.
+
+---
+
+## Security Notes
+
+`shutup-mcp` reads and launches MCP servers from a config file. Treat that config file as executable configuration.
+
+Do not use untrusted server configs.
+
+This project filters tool visibility; it does not enforce policy, authorization, sandboxing, or data-loss prevention.
+
+---
 
 ## License
 

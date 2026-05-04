@@ -1,188 +1,174 @@
-"""MCP proxy that filters tools dynamically based on user intent."""
+"""MCP proxy implementation for shutup-mcp.
+
+This module focuses on tools/list and tools/call. It exposes an explicit
+`shutup__set_intent` control tool so clients can update retrieval intent before
+asking for tools/list.
+"""
+
+from __future__ import annotations
 
 import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import Optional, List, Dict, Any
-
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-from mcp.server import Server, NotificationOptions
-from mcp.server.stdio import stdio_server
-from mcp.types import Tool, CallToolResult, TextContent
+from typing import Any, Dict, List, Optional
 
 from .retriever import HybridRetriever
 from .server_manager import ServerManager
 
 
+CONTROL_TOOL_NAME = "shutup__set_intent"
+
+
+def control_tool_definition() -> dict:
+    return {
+        "name": CONTROL_TOOL_NAME,
+        "description": "Set the current intent used by shutup-mcp to filter tools/list results.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "description": "The user's current task or tool-selection intent."
+                }
+            },
+            "required": ["intent"]
+        }
+    }
+
+
 class ShutupProxy:
-    """
-    An MCP proxy that intercepts requests and dynamically filters tools
-    based on the user's current intent.
-    """
+    """A minimal MCP JSON-RPC stdio proxy for tool filtering."""
 
     def __init__(
         self,
-        config_path: Optional[Path] = None,
+        config_path: Path,
+        intent: str = "",
         top_k: int = 5,
         embedder_backend: str = "sentence-transformers",
     ):
-        """
-        Initialize the proxy.
-        
-        Args:
-            config_path: Path to MCP config file (e.g., claude_desktop_config.json).
-            top_k: Number of tools to return to the agent.
-            embedder_backend: "sentence-transformers" or "ollama".
-        """
-        self.config_path = config_path
+        self.config_path = Path(config_path)
+        self.current_intent = intent or ""
         self.top_k = top_k
-        self.embedder_backend = embedder_backend
-
-        self.server_manager = ServerManager(config_path)
+        self.server_manager = ServerManager(self.config_path)
         self.retriever = HybridRetriever(embedder_backend=embedder_backend)
-
-        self.server = Server("shutup-mcp")
-
-        # Register MCP handlers
-        self.server.list_tools()(self.handle_list_tools)
-        self.server.call_tool()(self.handle_call_tool)
-
-        # Cache for upstream connections
-        self._upstream_sessions: Dict[str, ClientSession] = {}
-        
-        # Track the current intent (extracted from user messages)
-        self._current_intent: str = ""
+        self._indexed = False
 
     async def initialize(self) -> None:
-        """Fetch tools from all upstream servers and build the hybrid index."""
+        self.server_manager.load_config()
         tools = await self.server_manager.fetch_all_tools()
-        if tools:
-            tool_dicts = [
-                {"name": t.name, "description": t.description or ""}
-                for t in tools
-            ]
-            self.retriever.build_index(tool_dicts)
-        else:
-            print("[shutup] Warning: No tools found from upstream servers.", file=sys.stderr)
+        self.retriever.build_index(tools)
+        self._indexed = True
 
-    def _extract_intent_from_message(self, message: Dict[str, Any]) -> Optional[str]:
-        """
-        Extract user intent from an MCP message.
-        
-        In stdio MCP, user messages come through as prompts/get or tools/call
-        with natural language content.
-        """
-        # Look for text content in various possible locations
-        if "content" in message:
-            if isinstance(message["content"], str):
-                return message["content"]
-            elif isinstance(message["content"], list):
-                for item in message["content"]:
-                    if isinstance(item, dict) and item.get("type") == "text":
-                        return item.get("text", "")
-        if "params" in message:
-            params = message["params"]
-            if isinstance(params, dict):
-                if "arguments" in params and isinstance(params["arguments"], dict):
-                    # Check for common query fields
-                    for field in ["query", "message", "prompt", "text", "input"]:
-                        if field in params["arguments"]:
-                            return params["arguments"][field]
-        return None
+    async def filter_tools(self, intent: Optional[str] = None, top_k: Optional[int] = None) -> List[dict]:
+        if not self._indexed:
+            await self.initialize()
 
-    async def handle_list_tools(self) -> List[Tool]:
-        """Intercept tools/list and return dynamically filtered tools."""
-        all_tools = self.server_manager.get_all_tools()
+        query = intent if intent is not None else self.current_intent
+        k = top_k or self.top_k
 
-        if not all_tools:
-            return []
+        if query:
+            return [control_tool_definition()] + self.retriever.retrieve(query, top_k=k)
 
-        if not self._current_intent:
-            print("[shutup] No intent detected yet, returning all tools.", file=sys.stderr)
-            return all_tools
+        # No intent yet: expose only control tool plus a small safe preview.
+        preview = self.retriever.tools[: min(k, len(self.retriever.tools))]
+        return [control_tool_definition()] + preview
 
-        # Retrieve relevant tools using hybrid search
-        relevant_dicts = self.retriever.retrieve(self._current_intent, self.top_k)
-        relevant_names = {t["name"] for t in relevant_dicts}
+    async def handle_list_tools(self) -> dict:
+        tools = await self.filter_tools()
+        return {"tools": tools}
 
-        filtered_tools = [t for t in all_tools if t.name in relevant_names]
+    async def handle_call_tool(self, name: str, arguments: Optional[dict]) -> dict:
+        arguments = arguments or {}
 
-        print(
-            f"[shutup] Intent: '{self._current_intent[:50]}...' -> "
-            f"returning {len(filtered_tools)}/{len(all_tools)} tools.",
-            file=sys.stderr,
-        )
+        if name == CONTROL_TOOL_NAME:
+            intent = str(arguments.get("intent", "")).strip()
+            self.current_intent = intent
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps({"ok": True, "intent": self.current_intent}, ensure_ascii=False)
+                    }
+                ]
+            }
 
-        return filtered_tools
+        server = self.server_manager.get_server_for_tool(name)
+        if server is None:
+            raise ValueError(f"Unknown tool or missing server prefix: {name}")
 
-    async def handle_call_tool(self, name: str, arguments: Dict[str, Any]) -> CallToolResult:
-        """
-        Forward tool calls to the appropriate upstream server.
-        Also extracts intent from the call for future filtering.
-        """
-        # Update intent from this call
-        if "query" in arguments:
-            self._current_intent = str(arguments["query"])
-        elif "message" in arguments:
-            self._current_intent = str(arguments["message"])
-        elif "prompt" in arguments:
-            self._current_intent = str(arguments["prompt"])
-
-        # Find which server this tool belongs to
-        if "__" not in name:
-            raise ValueError(f"Tool name '{name}' does not have server prefix.")
-
-        server_name, original_tool_name = name.split("__", 1)
-        server_config = self.server_manager.servers.get(server_name)
-
-        if not server_config:
-            raise ValueError(f"Unknown server '{server_name}' for tool '{name}'.")
-
-        # Connect to the upstream server and call the tool
-        params = server_config.to_server_params()
+        # Connect per call for alpha simplicity.
         try:
-            async with stdio_client(params) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    result = await session.call_tool(original_tool_name, arguments)
-                    
-                    # Convert result to proper MCP format
-                    content = []
-                    if hasattr(result, 'content'):
-                        for item in result.content:
-                            if hasattr(item, 'text'):
-                                content.append(TextContent(type="text", text=item.text))
-                            else:
-                                content.append(item)
-                    elif isinstance(result, dict):
-                        content.append(TextContent(type="text", text=json.dumps(result)))
-                    else:
-                        content.append(TextContent(type="text", text=str(result)))
-                    
-                    return CallToolResult(content=content, isError=False)
-        except Exception as e:
-            print(f"[shutup] Error calling tool '{name}': {e}", file=sys.stderr)
-            return CallToolResult(
-                content=[TextContent(type="text", text=f"Error: {e}")],
-                isError=True
-            )
+            from mcp import ClientSession
+            from mcp.client.stdio import stdio_client
+        except Exception as exc:
+            raise RuntimeError("mcp package is required to call upstream tools") from exc
 
-    async def run(self) -> None:
-        """Start the proxy server."""
+        upstream_name = self.server_manager.upstream_tool_name(name)
+        params = server.to_server_params()
+
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                return await session.call_tool(upstream_name, arguments)
+
+    async def handle_json_rpc(self, request: dict) -> Optional[dict]:
+        method = request.get("method")
+        req_id = request.get("id")
+        params = request.get("params") or {}
+
+        try:
+            if method == "initialize":
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "protocolVersion": params.get("protocolVersion", "2024-11-05"),
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "shutup-mcp", "version": "0.3.0-alpha"}
+                    }
+                }
+
+            if method == "tools/list":
+                result = await self.handle_list_tools()
+                return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+            if method == "tools/call":
+                result = await self.handle_call_tool(params.get("name"), params.get("arguments") or {})
+                return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+            # Notification: initialized
+            if method == "notifications/initialized":
+                return None
+
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32601, "message": f"Method not implemented by alpha proxy: {method}"}
+            }
+        except Exception as exc:
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32000, "message": str(exc)}
+            }
+
+    async def serve_stdio(self) -> None:
         await self.initialize()
 
-        async with stdio_server() as (read_stream, write_stream):
-            await self.server.run(
-                read_stream,
-                write_stream,
-                self.server.create_initialization_options(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
-                ),
-            )
-
-    def shutdown(self) -> None:
-        """Clean up resources."""
-        self.server_manager.stop_observer()
+        loop = asyncio.get_running_loop()
+        while True:
+            line = await loop.run_in_executor(None, sys.stdin.readline)
+            if not line:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                request = json.loads(line)
+                response = await self.handle_json_rpc(request)
+                if response is not None:
+                    print(json.dumps(response, ensure_ascii=False), flush=True)
+            except Exception as exc:
+                error = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(exc)}}
+                print(json.dumps(error), flush=True)

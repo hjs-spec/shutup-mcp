@@ -1,173 +1,144 @@
-"""Embedding abstraction layer with multiple backend support."""
+"""Embedding backends for shutup-mcp."""
 
+from __future__ import annotations
+
+import hashlib
 import sys
 from abc import ABC, abstractmethod
-from typing import List, Union, Optional
+from typing import List, Optional, Union
+
 import numpy as np
 
 
 class BaseEmbedder(ABC):
-    """Abstract base class for embedding providers."""
+    """Base class for embedding backends."""
 
     @abstractmethod
     def encode(self, texts: Union[str, List[str]]) -> np.ndarray:
-        """Generate embeddings for the given text(s).
-
-        Args:
-            texts: A single string or a list of strings to embed.
-
-        Returns:
-            A numpy array of shape (n_texts, embedding_dim).
-        """
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def get_dimension(self) -> int:
-        """Return the dimension of the generated embeddings."""
-        pass
+        raise NotImplementedError
 
 
 class SentenceTransformerEmbedder(BaseEmbedder):
-    """Embedding provider using Sentence Transformers (local, no API key)."""
+    """Sentence Transformers backend.
+
+    The import is lazy so tests and lightweight installs do not download or
+    import the model unless this backend is actually used.
+    """
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        """Initialize the SentenceTransformer embedder.
-
-        Args:
-            model_name: Name of the sentence-transformers model.
-                        Default "all-MiniLM-L6-v2" is ~80MB and runs locally.
-        """
         try:
             from sentence_transformers import SentenceTransformer
-        except ImportError:
-            print(
-                "[shutup] Error: sentence-transformers not installed. "
-                "Run: pip install sentence-transformers",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        print(f"[shutup] Loading embedding model: {model_name} ...", file=sys.stderr)
+        except Exception as exc:
+            raise RuntimeError(
+                "sentence-transformers backend requires sentence-transformers. "
+                "Install the package or use --embedder fake/ollama."
+            ) from exc
+        self.model_name = model_name
         self.model = SentenceTransformer(model_name)
-        self._dimension = self.model.get_sentence_embedding_dimension()
-        print(
-            f"[shutup] Model loaded. Embedding dimension: {self._dimension}",
-            file=sys.stderr,
-        )
 
     def encode(self, texts: Union[str, List[str]]) -> np.ndarray:
-        """Generate embeddings using sentence-transformers."""
-        return self.model.encode(
-            texts, convert_to_numpy=True, show_progress_bar=False
-        )
+        single = isinstance(texts, str)
+        if single:
+            texts = [texts]
+        vectors = self.model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+        if single:
+            return vectors[0]
+        return vectors
 
     def get_dimension(self) -> int:
-        return self._dimension
+        return int(self.model.get_sentence_embedding_dimension())
 
 
 class OllamaEmbedder(BaseEmbedder):
-    """Embedding provider using Ollama (local server, privacy-focused)."""
+    """Ollama embedding backend."""
 
-    def __init__(
-        self,
-        model_name: str = "nomic-embed-text",
-        host: str = "http://localhost:11434",
-    ):
-        """Initialize the Ollama embedder.
-
-        Args:
-            model_name: Name of the Ollama embedding model.
-                        Default "nomic-embed-text" is recommended.
-            host: Ollama server URL.
-        """
+    def __init__(self, model: str = "nomic-embed-text"):
         try:
             import ollama
-        except ImportError:
-            print(
-                "[shutup] Error: ollama package not installed. "
-                "Run: pip install ollama",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        self.client = ollama.Client(host=host)
-        self.model_name = model_name
-        self.host = host
-
-        print(
-            f"[shutup] Connecting to Ollama at {host} with model '{model_name}' ...",
-            file=sys.stderr,
-        )
-        try:
-            test_embedding = self.client.embed(model=self.model_name, input="test")
-            self._dimension = len(test_embedding["embeddings"][0])
-            print(
-                f"[shutup] Ollama connected. Embedding dimension: {self._dimension}",
-                file=sys.stderr,
-            )
-        except Exception as e:
-            print(
-                f"[shutup] Error: Could not connect to Ollama. "
-                f"Is it running? ({e})",
-                file=sys.stderr,
-            )
-            print(
-                "[shutup] Install Ollama from https://ollama.com and run: "
-                "ollama pull nomic-embed-text",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        except Exception as exc:
+            raise RuntimeError("ollama backend requires the ollama Python package.") from exc
+        self.ollama = ollama
+        self.model = model
+        # nomic-embed-text dimension is typically 768.
+        self.dimension = 768
 
     def encode(self, texts: Union[str, List[str]]) -> np.ndarray:
-        """Generate embeddings using Ollama."""
-        if isinstance(texts, str):
+        single = isinstance(texts, str)
+        if single:
             texts = [texts]
-        response = self.client.embed(model=self.model_name, input=texts)
-        return np.array(response["embeddings"])
+        vectors = []
+        for text in texts:
+            response = self.ollama.embeddings(model=self.model, prompt=text)
+            vectors.append(response["embedding"])
+        arr = np.array(vectors, dtype=float)
+        norms = np.linalg.norm(arr, axis=1, keepdims=True) + 1e-8
+        arr = arr / norms
+        if single:
+            return arr[0]
+        return arr
 
     def get_dimension(self) -> int:
-        return self._dimension
+        return self.dimension
+
+
+class FakeEmbedder(BaseEmbedder):
+    """Deterministic lightweight embedder for tests and CI.
+
+    It hashes tokens into a fixed-size vector. It is not semantically strong,
+    but it is deterministic, fast, and has no network/model dependency.
+    """
+
+    def __init__(self, dimension: int = 64):
+        self.dimension = dimension
+
+    def encode(self, texts: Union[str, List[str]]) -> np.ndarray:
+        single = isinstance(texts, str)
+        if single:
+            texts = [texts]
+        vectors = []
+        for text in texts:
+            vec = np.zeros(self.dimension, dtype=float)
+            tokens = str(text).lower().replace("_", " ").replace("-", " ").split()
+            if not tokens:
+                tokens = [""]
+            for token in tokens:
+                digest = hashlib.sha256(token.encode("utf-8")).digest()
+                idx = int.from_bytes(digest[:4], "big") % self.dimension
+                vec[idx] += 1.0
+            norm = np.linalg.norm(vec) + 1e-8
+            vectors.append(vec / norm)
+        arr = np.vstack(vectors)
+        if single:
+            return arr[0]
+        return arr
+
+    def get_dimension(self) -> int:
+        return self.dimension
 
 
 def create_embedder(backend: str = "sentence-transformers", **kwargs) -> BaseEmbedder:
-    """Factory function to create an embedder instance.
+    """Create an embedder instance."""
 
-    Args:
-        backend: "sentence-transformers" or "ollama".
-        **kwargs: Additional arguments passed to the embedder constructor.
-
-    Returns:
-        A BaseEmbedder instance.
-    """
     if backend == "ollama":
         return OllamaEmbedder(**kwargs)
-    else:
-        return SentenceTransformerEmbedder(**kwargs)
+    if backend == "fake":
+        return FakeEmbedder(**kwargs)
+    return SentenceTransformerEmbedder(**kwargs)
 
 
 class ToolEmbedder:
-    """High-level tool indexing and search using an embedder backend."""
+    """High-level vector tool index."""
 
     def __init__(self, embedder: Optional[BaseEmbedder] = None, backend: str = "sentence-transformers"):
-        """Initialize the tool embedder.
-
-        Args:
-            embedder: Optional pre-configured embedder instance.
-            backend: Embedder backend to use if embedder is not provided.
-        """
-        if embedder is not None:
-            self.embedder = embedder
-        else:
-            self.embedder = create_embedder(backend)
-
+        self.embedder = embedder or create_embedder(backend)
         self.tools: List[dict] = []
         self.embeddings: Optional[np.ndarray] = None
 
     def build_index(self, tools: List[dict]) -> None:
-        """Build the embedding index from a list of tool definitions.
-
-        Each tool dict should have 'name' and 'description' fields.
-        """
         if not tools:
             print("[shutup] Warning: No tools provided to build index.", file=sys.stderr)
             self.tools = []
@@ -175,45 +146,23 @@ class ToolEmbedder:
             return
 
         self.tools = tools
-        texts = [f"{t['name']}: {t.get('description', '')}" for t in tools]
-        print(f"[shutup] Building embeddings for {len(texts)} tools...", file=sys.stderr)
+        texts = [f"{t.get('name', '')}: {t.get('description', '')}" for t in tools]
         self.embeddings = self.embedder.encode(texts)
-        print("[shutup] Embedding index built.", file=sys.stderr)
 
     def search(self, query: str, top_k: int = 5) -> List[dict]:
-        """Search for the top_k most relevant tools given a user intent query.
-
-        Args:
-            query: The user's intent or task description.
-            top_k: Number of tools to return.
-
-        Returns:
-            List of tool dicts ordered by relevance (most relevant first).
-        """
         if not self.tools or self.embeddings is None:
             return []
 
-        if len(self.tools) == 0:
-            return []
-
         query_embedding = self.embedder.encode([query])[0]
-
-        # Cosine similarity
         scores = np.dot(self.embeddings, query_embedding) / (
             np.linalg.norm(self.embeddings, axis=1) * np.linalg.norm(query_embedding) + 1e-8
         )
 
-        # Get indices of top_k scores
-        if top_k >= len(self.tools):
-            top_indices = np.argsort(scores)[::-1]
-        else:
-            top_indices = np.argpartition(scores, -top_k)[-top_k:]
-            top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
-
+        k = min(top_k, len(self.tools))
+        top_indices = np.argsort(scores)[::-1][:k]
         return [self.tools[i] for i in top_indices]
 
     def get_tool_by_name(self, name: str) -> Optional[dict]:
-        """Retrieve a tool by its name."""
         for tool in self.tools:
             if tool.get("name") == name:
                 return tool

@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shutup-mcp"
-version = "0.2.0"
-description = "A zero-config MCP proxy that hides irrelevant tools using hybrid search — dynamic intent detection included"
+version = "0.3.0a0"
+description = "Experimental MCP proxy for filtering large tool lists using hybrid semantic and keyword retrieval"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
     {name = "yuqiang", email = "yuqiang@humanjudgment.org"}
 ]
-keywords = ["mcp", "agent", "tools", "filter", "token", "llm", "ollama", "embeddings", "bm25", "hybrid-search"]
+keywords = ["mcp", "model-context-protocol", "agent", "tools", "filter", "ollama", "embeddings", "bm25", "hybrid-search"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -26,15 +26,17 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.0.0",
-    "sentence-transformers>=2.2.0",
-    "watchdog>=3.0.0",
-    "ollama>=0.1.0",
     "numpy>=1.24.0",
-    "rank-bm25>=0.2.2",
-    "nltk>=3.8.0",
+    "watchdog>=3.0.0",
 ]
 
 [project.optional-dependencies]
+sentence-transformers = [
+    "sentence-transformers>=2.2.0",
+]
+ollama = [
+    "ollama>=0.1.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",

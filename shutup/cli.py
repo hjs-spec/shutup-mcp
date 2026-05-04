@@ -1,78 +1,58 @@
-"""Command-line interface for shutup-mcp."""
+"""Command line interface for shutup-mcp."""
+
+from __future__ import annotations
 
 import argparse
 import asyncio
-import sys
+import json
 from pathlib import Path
 
 from .proxy import ShutupProxy
+from .server_manager import ServerManager
+from .retriever import HybridRetriever
 
 
-def main():
-    """Entry point for the shutup command."""
-    parser = argparse.ArgumentParser(
-        description="shutup - An MCP proxy that dynamically filters tools based on user intent.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Use with sentence-transformers (default)
-  shutup --config ~/.../claude_desktop_config.json
+async def run_filter(config: Path, intent: str, top_k: int, embedder: str) -> list[dict]:
+    manager = ServerManager(config)
+    manager.load_config()
+    tools = await manager.fetch_all_tools()
+    retriever = HybridRetriever(embedder_backend=embedder)
+    retriever.build_index(tools)
+    if intent:
+        return retriever.retrieve(intent, top_k=top_k)
+    return tools[:top_k]
 
-  # Use with Ollama for fully offline embeddings
-  shutup --config ~/.../claude_desktop_config.json --embedder ollama
 
-  # Return top 3 tools instead of default 5
-  shutup --config ~/.../claude_desktop_config.json --top-k 3
-""",
-    )
+async def run_proxy(config: Path, intent: str, top_k: int, embedder: str) -> None:
+    proxy = ShutupProxy(config_path=config, intent=intent, top_k=top_k, embedder_backend=embedder)
+    await proxy.serve_stdio()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Filter large MCP tool lists using intent-aware retrieval.")
+    parser.add_argument("--config", required=True, help="Path to Claude Desktop MCP config JSON")
+    parser.add_argument("--intent", default="", help="Current task intent used to filter tools")
+    parser.add_argument("--top-k", type=int, default=5, help="Number of tools to expose")
     parser.add_argument(
-        "--config", "-c",
-        type=str,
-        required=True,
-        help="Path to MCP config file (e.g., claude_desktop_config.json)."
-    )
-    parser.add_argument(
-        "--top-k", "-k",
-        type=int,
-        default=5,
-        help="Number of tools to return (default: 5)."
-    )
-    parser.add_argument(
-        "--embedder", "-e",
-        type=str,
-        choices=["sentence-transformers", "ollama"],
+        "--embedder",
         default="sentence-transformers",
-        help="Embedding backend to use (default: sentence-transformers)."
+        choices=["sentence-transformers", "ollama", "fake"],
+        help="Embedding backend",
     )
+    parser.add_argument("--serve", action="store_true", help="Run as MCP stdio proxy")
+    return parser
 
-    args = parser.parse_args()
 
-    config_path = Path(args.config).expanduser().resolve()
-    if not config_path.exists():
-        print(f"[shutup] Error: Config file not found: {config_path}", file=sys.stderr)
-        sys.exit(1)
+def main() -> None:
+    args = build_parser().parse_args()
+    config = Path(args.config).expanduser()
 
-    print(f"[shutup] Starting with config: {config_path}", file=sys.stderr)
-    print(f"[shutup] Top-K: {args.top_k}", file=sys.stderr)
-    print(f"[shutup] Embedder: {args.embedder}", file=sys.stderr)
-    print("[shutup] Dynamic intent detection: ENABLED", file=sys.stderr)
+    if args.serve:
+        asyncio.run(run_proxy(config, args.intent, args.top_k, args.embedder))
+        return
 
-    proxy = ShutupProxy(
-        config_path=config_path,
-        top_k=args.top_k,
-        embedder_backend=args.embedder,
-    )
-
-    try:
-        asyncio.run(proxy.run())
-    except KeyboardInterrupt:
-        print("\n[shutup] Shutting down.", file=sys.stderr)
-        proxy.shutdown()
-        sys.exit(0)
-    except Exception as e:
-        print(f"[shutup] Fatal error: {e}", file=sys.stderr)
-        proxy.shutdown()
-        sys.exit(1)
+    results = asyncio.run(run_filter(config, args.intent, args.top_k, args.embedder))
+    print(json.dumps(results, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

@@ -1,50 +1,52 @@
-name: 'shutup - MCP Tool Filter'
-description: 'Hide 99% of your MCP tools so your agent can finally focus.'
-author: 'HJS Foundation'
+name: "shutup-mcp Tool Filter"
+description: "Filter MCP tools for a task intent using shutup-mcp"
+author: "hjs-spec"
 
 branding:
-  icon: 'filter'
-  color: 'gray-dark'
+  icon: "filter"
+  color: "gray-dark"
 
 inputs:
   config:
-    description: 'Path to your MCP config file (e.g., claude_desktop_config.json)'
+    description: "Path to your MCP config file"
     required: true
   intent:
-    description: 'Description of the user task'
+    description: "Description of the user task"
     required: true
   top_k:
-    description: 'Number of relevant tools to return'
+    description: "Number of relevant tools to return"
     required: false
-    default: '5'
+    default: "5"
   embedder:
-    description: 'Embedding backend (sentence-transformers or ollama)'
+    description: "Embedding backend: sentence-transformers, ollama, or fake"
     required: false
-    default: 'sentence-transformers'
+    default: "sentence-transformers"
 
 outputs:
   filtered_tools:
-    description: 'A JSON array of the filtered tool names and descriptions'
+    description: "JSON array of filtered tool definitions"
   tool_count:
-    description: 'The number of tools returned'
+    description: "Number of tools returned"
 
 runs:
-  using: 'composite'
+  using: "composite"
   steps:
     - name: Setup Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
-    - name: Install shutup
+        python-version: "3.11"
+    - name: Install shutup-mcp
       run: pip install shutup-mcp
       shell: bash
     - name: Run shutup
       id: filter
       run: |
-        # 执行 shutup 命令并捕获 JSON 输出
-        output=$(shutup --config ${{ inputs.config }} --intent "${{ inputs.intent }}" --top-k ${{ inputs.top_k }} --embedder ${{ inputs.embedder }})
-        # 将输出写入 GitHub Actions 的输出变量
-        echo "filtered_tools=$output" >> $GITHUB_OUTPUT
-        # 计算工具数量
-        echo "tool_count=$(echo $output | jq '. | length')" >> $GITHUB_OUTPUT
+        shutup --config "${{ inputs.config }}" --intent "${{ inputs.intent }}" --top-k "${{ inputs.top_k }}" --embedder "${{ inputs.embedder }}" > /tmp/shutup-tools.json
+        count=$(python -c 'import json; print(len(json.load(open("/tmp/shutup-tools.json"))))')
+        {
+          echo "filtered_tools<<EOF"
+          cat /tmp/shutup-tools.json
+          echo "EOF"
+          echo "tool_count=$count"
+        } >> "$GITHUB_OUTPUT"
       shell: bash
