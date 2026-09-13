@@ -110,7 +110,8 @@ class ShutupProxy:
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                return await session.call_tool(upstream_name, arguments)
+                result = await session.call_tool(upstream_name, arguments)
+                return result.model_dump(mode="json", by_alias=True, exclude_none=True)
 
     async def handle_json_rpc(self, request: dict) -> Optional[dict]:
         method = request.get("method")
